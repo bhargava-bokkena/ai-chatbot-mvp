@@ -221,6 +221,9 @@ def finalize_reply(reply_text: str, needs_handoff: bool, tags: List[str]) -> str
 def health():
     return {"ok": True}
 
+@app.get("/")
+def root():
+    return {"ok": True, "service": "ai-reply-assistant"}
 
 @app.get("/logs")
 def logs(token: str = ""):
