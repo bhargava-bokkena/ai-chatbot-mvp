@@ -48,13 +48,14 @@ BUSINESS_CONTEXT = {
     "hours_unknown_message": "I don’t have the hours handy right now, but I can check with the owner and get back to you shortly.",
     "location_unknown_message": "I don’t have the address handy right now, but I can check with the owner and follow up shortly.",
 
-    # FIX #1: “our services” phrasing
+    # Inventory fix (consistent phrasing)
     "inventory_unknown_message": "We don’t carry retail products like that. We primarily offer services — would you like help with any of our services?",
 
     "emergency_message": "If this is an emergency or someone is in danger, please call 911 right now. If you’re safe, share a brief summary and I’ll pass it to the owner.",
     "short_message_clarify": "Sorry — could you share a bit more detail so I can help?",
 
-    # New: a clean “booking details received” acknowledgement
+    # Booking: make the question consistent (deterministic)
+    "booking_question_template": "To help with your booking request, what service is it for, what’s your name, and the best contact number?",
     "booking_details_received": "Thanks — got it. I’ll pass this to the owner to confirm availability and follow up shortly.",
 }
 
@@ -82,7 +83,6 @@ INVENTORY_KEYWORDS = re.compile(
     re.IGNORECASE
 )
 
-# Very lightweight heuristic: looks like booking details (service + name/number)
 BOOKING_DETAILS_HINT = re.compile(r"\b(\d{6,}|\d{3}[-\s]?\d{3}[-\s]?\d{4})\b")
 
 
@@ -136,6 +136,9 @@ ALLOWED_TAGS = {
 ALWAYS_HANDOFF_TAGS = {"complaint", "emergency"}
 
 
+# =========================
+# Helper funcs
+# =========================
 def now_ts() -> str:
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
@@ -211,6 +214,9 @@ def finalize_reply(reply_text: str, needs_handoff: bool, tags: List[str]) -> str
     return BUSINESS_CONTEXT["handoff_message"]
 
 
+# =========================
+# Routes
+# =========================
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -262,15 +268,15 @@ async def inbound_message(request: Request):
     needs_handoff = True
     tags: List[str] = ["other"]
 
-    # --- NEW: Tiny “conversation memory” for booking follow-up ---
-    # If the last reply to this sender was a booking question, treat next message as details.
+    # --- Minimal “conversation memory” for booking follow-up ---
     last = get_last_message_for_sender(from_number)
-    last_tags = (last.get("tags", "") if last else "") or ""
+    last_tags_str = (last.get("tags", "") if last else "") or ""
     last_reply = (last.get("reply_text", "") if last else "") or ""
-    last_was_booking_question = ("booking" in last_tags.split(",")) and looks_like_info_collection(last_reply)
+    last_tags = [t for t in last_tags_str.split(",") if t.strip()]
+
+    last_was_booking_question = ("booking" in last_tags) and looks_like_info_collection(last_reply)
 
     if last_was_booking_question and ("booking" not in incoming.lower()):
-        # If it looks like they’re providing details (often includes a number), acknowledge + handoff
         if BOOKING_DETAILS_HINT.search(incoming) or len(incoming.split()) >= 2:
             reply_text = BUSINESS_CONTEXT["booking_details_received"]
             needs_handoff = True
@@ -309,7 +315,7 @@ async def inbound_message(request: Request):
         resp.message(reply_text)
         return PlainTextResponse(str(resp), media_type="application/xml")
 
-    # 2) Inventory/product fix (milk/eggs/toys/gems/etc.)
+    # 2) Inventory/product fix
     if INVENTORY_KEYWORDS.search(incoming) and (
         "service" in BUSINESS_CONTEXT["business_type"].lower() or is_unknown(BUSINESS_CONTEXT["services"])
     ):
@@ -375,6 +381,12 @@ async def inbound_message(request: Request):
 
                 reply_text = raw_reply if raw_reply else BUSINESS_CONTEXT["handoff_message"]
                 reply_text = finalize_reply(reply_text, needs_handoff, tags)
+
+                # ✅ CONSISTENCY OVERRIDE:
+                # If this is a booking info-collection message, force our exact template wording.
+                if "booking" in tags and needs_handoff and looks_like_info_collection(reply_text):
+                    reply_text = BUSINESS_CONTEXT["booking_question_template"]
+
             else:
                 reply_text = BUSINESS_CONTEXT["handoff_message"]
                 needs_handoff = True
