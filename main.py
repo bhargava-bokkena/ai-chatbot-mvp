@@ -43,7 +43,6 @@ BUSINESS_CONTEXT = {
     "location": "UNKNOWN",
     "hours": "UNKNOWN",
     "services": "UNKNOWN",
-
     "handoff_message": "Thanks for reaching out — I’m going to pass this to the owner and they’ll follow up shortly.",
     "hours_unknown_message": "I don’t have the hours handy right now, but I can check with the owner and get back to you shortly.",
     "location_unknown_message": "I don’t have the address handy right now, but I can check with the owner and follow up shortly.",
@@ -77,10 +76,16 @@ def looks_like_question(text: str) -> bool:
 
 
 def enforce_length(text: str) -> str:
+    text = re.sub(r"\s+", " ", (text or "")).strip()
     return text[:240]
 
 
-def send_alert_if_needed(tags, needs_handoff, from_number, incoming, reply_text):
+def send_alert_if_needed(tags: List[str], needs_handoff: bool, from_number: str, incoming: str, reply_text: str) -> None:
+    """
+    Sends an email alert when we need owner follow-up.
+    Logs SendGrid status/errors to Render logs.
+    Never breaks the user reply flow if email fails.
+    """
     if not needs_handoff:
         return
 
@@ -96,13 +101,17 @@ def send_alert_if_needed(tags, needs_handoff, from_number, incoming, reply_text)
         f"Reply sent:\n{reply_text}\n"
     )
 
-    send_handoff_email(
-        subject=subject,
-        content=body,
-        to_email=ALERT_EMAIL_TO,
-        from_email=ALERT_EMAIL_FROM,
-        api_key=SENDGRID_API_KEY,
-    )
+    try:
+        status = send_handoff_email(
+            subject=subject,
+            content=body,
+            to_email=ALERT_EMAIL_TO,
+            from_email=ALERT_EMAIL_FROM,
+            api_key=SENDGRID_API_KEY,
+        )
+        print("SendGrid alert send attempt. status=", status)
+    except Exception as e:
+        print("SendGrid: exception:", repr(e))
 
 
 # =========================
@@ -129,7 +138,8 @@ def logs(token: str = ""):
     for r in rows:
         html.append(
             f"<tr><td>{r['ts']}</td><td>{r['from_number']}</td>"
-            f"<td>{r['inbound_text']}</td><td>{r['reply_text']}</td>"
+            f"<td>{(r['inbound_text'] or '').replace('<','&lt;')}</td>"
+            f"<td>{(r['reply_text'] or '').replace('<','&lt;')}</td>"
             f"<td>{r['tags']}</td><td>{r['needs_handoff']}</td></tr>"
         )
     html.append("</table></body></html>")
@@ -144,13 +154,14 @@ async def inbound(request: Request):
     to_number = (form.get("To") or "").strip()
 
     ts = now_ts()
+
     reply_text = BUSINESS_CONTEXT["handoff_message"]
     needs_handoff = True
-    tags = ["general"]
+    tags: List[str] = ["general"]
 
     last = get_last_message_for_sender(from_number)
-    last_reply = last["reply_text"] if last else ""
-    last_tags = (last["tags"] or "").split(",") if last else []
+    last_reply = (last.get("reply_text") if last else "") or ""
+    last_tags = ((last.get("tags") if last else "") or "").split(",") if last else []
 
     # Follow-up booking details
     if "booking" in last_tags and looks_like_question(last_reply):
@@ -158,6 +169,8 @@ async def inbound(request: Request):
             reply_text = BUSINESS_CONTEXT["booking_details_received"]
             tags = ["booking"]
             needs_handoff = True
+
+            reply_text = enforce_length(reply_text)
 
             log_message(ts, "whatsapp", from_number, to_number, incoming, reply_text, tags, needs_handoff)
             send_alert_if_needed(tags, needs_handoff, from_number, incoming, reply_text)
@@ -203,10 +216,11 @@ async def inbound(request: Request):
                     ],
                     temperature=0.2,
                 )
-                reply_text = completion.choices[0].message.content.strip()
+                reply_text = (completion.choices[0].message.content or "").strip()
                 needs_handoff = False
                 tags = ["general"]
-            except Exception:
+            except Exception as e:
+                print("OpenAI error:", repr(e))
                 reply_text = BUSINESS_CONTEXT["handoff_message"]
                 needs_handoff = True
                 tags = ["other"]
