@@ -1,5 +1,4 @@
 from typing import Optional
-
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 
@@ -12,13 +11,8 @@ def send_handoff_email(
     from_email: str,
     api_key: str,
 ) -> Optional[str]:
-    """
-    Sends an email via SendGrid.
-    Returns status code as string, or None if missing config.
-    Logs status/errors to stdout (Render logs).
-    """
     if not (to_email and from_email and api_key):
-        print("SendGrid: missing env vars (to/from/key)")
+        print("SendGrid: missing env vars (to/from/key)", flush=True)
         return None
 
     message = Mail(
@@ -30,6 +24,6 @@ def send_handoff_email(
 
     sg = SendGridAPIClient(api_key)
     resp = sg.send(message)
-    print("SendGrid: status=", resp.status_code)
+    print("SendGrid: status=", resp.status_code, flush=True)
     return str(resp.status_code)
 
