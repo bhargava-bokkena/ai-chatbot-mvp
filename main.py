@@ -1,8 +1,7 @@
 import os
-import json
 import re
 from datetime import datetime
-from typing import Any, Dict, Optional, List
+from typing import List
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse, HTMLResponse
@@ -43,13 +42,16 @@ BUSINESS_CONTEXT = {
     "location": "UNKNOWN",
     "hours": "UNKNOWN",
     "services": "UNKNOWN",
+
     "handoff_message": "Thanks for reaching out — I’m going to pass this to the owner and they’ll follow up shortly.",
     "hours_unknown_message": "I don’t have the hours handy right now, but I can check with the owner and get back to you shortly.",
     "location_unknown_message": "I don’t have the address handy right now, but I can check with the owner and follow up shortly.",
     "inventory_unknown_message": "We don’t carry retail products like that. We primarily offer services — would you like help with any of our services?",
     "emergency_message": "If this is an emergency, please contact local emergency services immediately.",
     "short_message_clarify": "Could you please share a bit more detail so I can help?",
-    "booking_question_template": "To help with your booking request, what service is it for, what’s your name, and the best contact number?",
+
+    # ✅ Updated wording
+    "booking_question_template": "To help with your booking request, please provide the service it’s for, your name, and the best contact number.",
     "booking_details_received": "Thanks — got it. I’ll pass this to the owner to confirm availability and follow up shortly.",
 }
 
@@ -58,10 +60,12 @@ BUSINESS_CONTEXT = {
 # Regex helpers
 # =========================
 EMERGENCY_KEYWORDS = re.compile(r"\b(911|emergency|ambulance|police|fire|danger)\b", re.I)
-HOURS_QUERY = re.compile(r"\b(open|close|hours|open today)\b", re.I)
-LOCATION_QUERY = re.compile(r"\b(address|location|where are you)\b", re.I)
+HOURS_QUERY = re.compile(r"\b(open|close|hours|open today|open now)\b", re.I)
+LOCATION_QUERY = re.compile(r"\b(address|location|where are you|directions)\b", re.I)
 INVENTORY_KEYWORDS = re.compile(r"\b(milk|eggs|bread|toys|gems)\b", re.I)
-BOOKING_HINT = re.compile(r"\b(\d{6,}|\d{3}[- ]?\d{3}[- ]?\d{4})\b")
+
+# Phone-like or long digit strings often indicate contact info
+BOOKING_DETAILS_HINT = re.compile(r"\b(\d{6,}|\d{3}[- ]?\d{3}[- ]?\d{4})\b")
 
 
 # =========================
@@ -72,19 +76,23 @@ def now_ts() -> str:
 
 
 def looks_like_question(text: str) -> bool:
-    return "?" in text or text.lower().startswith(("what", "which", "when", "how", "can you", "could you", "please"))
+    t = (text or "").strip().lower()
+    return "?" in t or t.startswith(("what", "which", "when", "how", "can you", "could you", "please"))
 
 
-def enforce_length(text: str) -> str:
-    text = re.sub(r"\s+", " ", (text or "")).strip()
-    return text[:240]
+def clean_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "")).strip()
+
+
+def enforce_length(text: str, max_len: int = 240) -> str:
+    t = clean_text(text)
+    return t[:max_len]
 
 
 def send_alert_if_needed(tags: List[str], needs_handoff: bool, from_number: str, incoming: str, reply_text: str) -> None:
     """
-    Sends an email alert when we need owner follow-up.
-    Logs SendGrid status/errors to Render logs.
-    Never breaks the user reply flow if email fails.
+    Sends an email alert when owner follow-up is needed.
+    Quiet on success; logs only on errors.
     """
     if not needs_handoff:
         return
@@ -102,16 +110,17 @@ def send_alert_if_needed(tags: List[str], needs_handoff: bool, from_number: str,
     )
 
     try:
-        status = send_handoff_email(
+        # No-op if env vars missing (emailer returns None), still safe
+        send_handoff_email(
             subject=subject,
             content=body,
             to_email=ALERT_EMAIL_TO,
             from_email=ALERT_EMAIL_FROM,
             api_key=SENDGRID_API_KEY,
         )
-        print("SendGrid alert send attempt. status=", status)
     except Exception as e:
-        print("SendGrid: exception:", repr(e))
+        # Only log real failures; never break user reply flow
+        print("SendGrid alert error:", repr(e), flush=True)
 
 
 # =========================
@@ -129,18 +138,20 @@ def health():
 
 @app.get("/logs")
 def logs(token: str = ""):
+    if not DASH_TOKEN:
+        raise HTTPException(status_code=404)
     if token != DASH_TOKEN:
         raise HTTPException(status_code=401)
 
-    rows = get_recent_messages()
-    html = ["<html><body><table border=1>"]
+    rows = get_recent_messages(limit=200)
+    html = ["<html><body><h2>Recent Messages</h2><table border=1 cellpadding=6 cellspacing=0>"]
     html.append("<tr><th>Time</th><th>From</th><th>Inbound</th><th>Reply</th><th>Tags</th><th>Handoff</th></tr>")
     for r in rows:
+        inbound = (r.get("inbound_text") or "").replace("<", "&lt;")
+        reply = (r.get("reply_text") or "").replace("<", "&lt;")
         html.append(
-            f"<tr><td>{r['ts']}</td><td>{r['from_number']}</td>"
-            f"<td>{(r['inbound_text'] or '').replace('<','&lt;')}</td>"
-            f"<td>{(r['reply_text'] or '').replace('<','&lt;')}</td>"
-            f"<td>{r['tags']}</td><td>{r['needs_handoff']}</td></tr>"
+            f"<tr><td>{r.get('ts')}</td><td>{r.get('from_number')}</td>"
+            f"<td>{inbound}</td><td>{reply}</td><td>{r.get('tags')}</td><td>{r.get('needs_handoff')}</td></tr>"
         )
     html.append("</table></body></html>")
     return HTMLResponse("".join(html))
@@ -149,29 +160,33 @@ def logs(token: str = ""):
 @app.post("/webhook/inbound")
 async def inbound(request: Request):
     form = await request.form()
-    incoming = (form.get("Body") or "").strip()
-    from_number = (form.get("From") or "").strip()
-    to_number = (form.get("To") or "").strip()
+    incoming = clean_text(form.get("Body") or "")
+    from_number = clean_text(form.get("From") or "")
+    to_number = clean_text(form.get("To") or "")
 
     ts = now_ts()
 
+    # Defaults
     reply_text = BUSINESS_CONTEXT["handoff_message"]
     needs_handoff = True
     tags: List[str] = ["general"]
 
+    # --------- Minimal booking follow-up memory ----------
     last = get_last_message_for_sender(from_number)
-    last_reply = (last.get("reply_text") if last else "") or ""
-    last_tags = ((last.get("tags") if last else "") or "").split(",") if last else []
+    last_reply = clean_text((last.get("reply_text") if last else "") or "")
+    last_tags_str = (last.get("tags") if last else "") or ""
+    last_tags = [t.strip() for t in last_tags_str.split(",") if t.strip()]
 
-    # Follow-up booking details
-    if "booking" in last_tags and looks_like_question(last_reply):
-        if BOOKING_HINT.search(incoming) or len(incoming.split()) >= 2:
+    last_was_booking_question = ("booking" in last_tags) and looks_like_question(last_reply)
+
+    # If last message asked for booking details, and user now sends details, acknowledge & handoff
+    if last_was_booking_question and incoming:
+        if BOOKING_DETAILS_HINT.search(incoming) or len(incoming.split()) >= 2:
             reply_text = BUSINESS_CONTEXT["booking_details_received"]
             tags = ["booking"]
             needs_handoff = True
 
             reply_text = enforce_length(reply_text)
-
             log_message(ts, "whatsapp", from_number, to_number, incoming, reply_text, tags, needs_handoff)
             send_alert_if_needed(tags, needs_handoff, from_number, incoming, reply_text)
 
@@ -179,7 +194,7 @@ async def inbound(request: Request):
             resp.message(reply_text)
             return PlainTextResponse(str(resp), media_type="application/xml")
 
-    # Short message
+    # --------- Rule-based shortcuts ----------
     if len(incoming) < 3:
         reply_text = BUSINESS_CONTEXT["short_message_clarify"]
         needs_handoff = False
@@ -187,51 +202,53 @@ async def inbound(request: Request):
 
     elif EMERGENCY_KEYWORDS.search(incoming):
         reply_text = BUSINESS_CONTEXT["emergency_message"]
-        tags = ["emergency"]
         needs_handoff = True
+        tags = ["emergency"]
 
     elif INVENTORY_KEYWORDS.search(incoming):
         reply_text = BUSINESS_CONTEXT["inventory_unknown_message"]
-        tags = ["service_question"]
         needs_handoff = False
+        tags = ["service_question"]
 
     elif HOURS_QUERY.search(incoming):
         reply_text = BUSINESS_CONTEXT["hours_unknown_message"]
-        tags = ["hours"]
         needs_handoff = True
+        tags = ["hours"]
 
     elif LOCATION_QUERY.search(incoming):
         reply_text = BUSINESS_CONTEXT["location_unknown_message"]
-        tags = ["location"]
         needs_handoff = True
+        tags = ["location"]
 
-    else:
-        if client:
-            try:
-                completion = client.chat.completions.create(
-                    model="gpt-4.1-mini",
-                    messages=[
-                        {"role": "system", "content": "You reply for a local business. Keep replies short and safe."},
-                        {"role": "user", "content": incoming},
-                    ],
-                    temperature=0.2,
-                )
-                reply_text = (completion.choices[0].message.content or "").strip()
-                needs_handoff = False
-                tags = ["general"]
-            except Exception as e:
-                print("OpenAI error:", repr(e))
-                reply_text = BUSINESS_CONTEXT["handoff_message"]
-                needs_handoff = True
-                tags = ["other"]
+    # --------- Booking override (deterministic) ----------
+    # Trigger booking flow when user asks to book/schedule/appointment
+    booking_trigger = any(w in incoming.lower() for w in ["book", "booking", "schedule", "appointment"])
+    if booking_trigger:
+        reply_text = BUSINESS_CONTEXT["booking_question_template"]
+        needs_handoff = True
+        tags = ["booking"]
+
+    # --------- LLM fallback ----------
+    if tags == ["general"] and client and incoming:
+        try:
+            completion = client.chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[
+                    {"role": "system", "content": "You reply for a local service business. Be short, professional, and safe."},
+                    {"role": "user", "content": incoming},
+                ],
+                temperature=0.2,
+            )
+            reply_text = clean_text((completion.choices[0].message.content or "").strip())
+            needs_handoff = False
+            tags = ["general"]
+        except Exception as e:
+            print("OpenAI error:", repr(e), flush=True)
+            reply_text = BUSINESS_CONTEXT["handoff_message"]
+            needs_handoff = True
+            tags = ["other"]
 
     reply_text = enforce_length(reply_text)
-
-    # Booking question override
-    if "book" in incoming.lower():
-        reply_text = BUSINESS_CONTEXT["booking_question_template"]
-        tags = ["booking"]
-        needs_handoff = True
 
     log_message(ts, "whatsapp", from_number, to_number, incoming, reply_text, tags, needs_handoff)
     send_alert_if_needed(tags, needs_handoff, from_number, incoming, reply_text)
