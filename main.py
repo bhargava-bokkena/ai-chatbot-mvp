@@ -141,6 +141,30 @@ def looks_like_booking_details(text: str) -> bool:
     return has_word
 
 
+def looks_like_booking_partial(text: str) -> bool:
+    """
+    Booking-intent message where they gave service/name and *some* short number token (like ZIP),
+    but NOT a real phone number. Example: "Foot massage john 67890"
+    We treat this as booking intent and ask the standard booking template.
+    """
+    t = clean_text(text)
+    if not t:
+        return False
+
+    # Need at least two alpha tokens (service + name-ish)
+    alpha_tokens = re.findall(r"[A-Za-z]{2,}", t)
+    if len(alpha_tokens) < 2:
+        return False
+
+    # Has a 3–5 digit token (likely ZIP / short code)
+    has_short_number = bool(re.search(r"\b\d{3,5}\b", t))
+
+    # Must NOT already have a phone-like 7+ digit number
+    has_phone = bool(DIGITS_7PLUS.search(t) or PHONE_LIKE_STRICT.search(t))
+
+    return has_short_number and (not has_phone)
+
+
 def send_alert_if_needed(tags: List[str], needs_handoff: bool, from_number: str, incoming: str, reply_text: str) -> None:
     if not needs_handoff:
         return
@@ -231,6 +255,10 @@ async def inbound(request: Request):
     # 0) Direct booking details any time (with 7+ digit phone)
     if incoming and looks_like_booking_details(incoming):
         return reply_and_log(ts, from_number, to_number, incoming, BUSINESS_CONTEXT["booking_details_received"], ["booking"], True)
+
+    # 0b) Booking partial (service+name + short number like ZIP) -> treat as booking intent
+    if incoming and looks_like_booking_partial(incoming):
+        return reply_and_log(ts, from_number, to_number, incoming, BUSINESS_CONTEXT["booking_question_template"], ["booking"], True)
 
     # 1) Very short messages
     if len(incoming) < 3:
