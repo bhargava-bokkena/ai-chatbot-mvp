@@ -317,13 +317,38 @@ async def inbound(request: Request):
     if BOOKING_TRIGGER.search(incoming):
         return reply_and_log(ts, from_number, to_number, incoming, BUSINESS_CONTEXT["booking_question_template"], ["booking"], True)
 
-    # 8) Follow-up after booking question: ONLY accept if message contains 7+ digit phone
-    # (fixes "what services do you offer?" being mis-classified)
-    if last_was_booking_question and incoming:
-        if looks_like_booking_details(incoming):
-            return reply_and_log(ts, from_number, to_number, incoming, BUSINESS_CONTEXT["booking_details_received"], ["booking"], True)
-        # otherwise, re-ask booking template (don't guess)
-        return reply_and_log(ts, from_number, to_number, incoming, BUSINESS_CONTEXT["booking_question_template"], ["booking"], True)
+   # 8) Follow-up after booking question:
+# Only stay in booking mode if they are still talking about booking.
+if last_was_booking_question and incoming:
+    # If they provided proper booking details, accept it
+    if looks_like_booking_details(incoming):
+        return reply_and_log(
+            ts,
+            from_number,
+            to_number,
+            incoming,
+            BUSINESS_CONTEXT["booking_details_received"],
+            ["booking"],
+            True,
+        )
+
+    # If they are still asking about booking, re-ask the booking template.
+    still_booking = bool(
+        BOOKING_TRIGGER.search(incoming)
+        or (AVAILABILITY_INTENT.search(incoming) and (TIME_TOKEN.search(incoming) or DATE_TOKEN.search(incoming)))
+    )
+    if still_booking:
+        return reply_and_log(
+            ts,
+            from_number,
+            to_number,
+            incoming,
+            BUSINESS_CONTEXT["booking_question_template"],
+            ["booking"],
+            True,
+        )
+
+   # Otherwise, do NOT force booking. Let it fall through to other checks below.
 
     # 9) Retail intent blocker (prevents hallucinations like "we sell trees")
     if RETAIL_INTENT.search(incoming):
