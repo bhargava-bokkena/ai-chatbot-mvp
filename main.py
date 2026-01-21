@@ -72,7 +72,7 @@ SERVICE_DISCOVERY = re.compile(
     re.I,
 )
 
-BOOKING_TRIGGER = re.compile(r"\b(book|booking|schedule|appointment|appt|reserve)\b", re.I)
+BOOKING_TRIGGER = re.compile(r"\b(book|booking|schedule|appointments?|appt|reserve)\b", re.I)
 
 # availability intent (this fixes "Do you have availability for 12PM?")
 AVAILABILITY_INTENT = re.compile(r"\b(availability|available)\b", re.I)
